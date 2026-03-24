@@ -1,11 +1,12 @@
 import Foundation
 
-/// Scans ~/.claude/projects/ directories to discover projects and session files.
-/// Port of server/services/project-scanner.ts
+/// Scans project directories to discover projects and session files.
+/// Supports both Claude Code (~/.claude/) and Cursor (~/.cursor/) layouts.
 struct ProjectScanner {
     let claudeDir: URL
     let parser: SessionParser
     let pricingTable: [String: ModelPricing]
+    var provider: AIProvider = .claudeCode
 
     /// Scan all projects and collect session metadata
     func scan() async -> (projects: [Project], sessionsByProject: [String: [SessionSummary]]) {
@@ -28,26 +29,42 @@ struct ProjectScanner {
 
         await withTaskGroup(of: (String, [SessionSummary])?.self) { group in
             for dirName in projectDirs {
+                let currentProvider = self.provider
                 group.addTask {
                     let dirURL = projectsDir.appendingPathComponent(dirName)
                     guard let topFiles = try? fm.contentsOfDirectory(atPath: dirURL.path) else {
                         return nil
                     }
 
-                    // Collect top-level .jsonl files and subagent .jsonl files
+                    // Collect session .jsonl files based on provider layout
                     var jsonlEntries: [(url: URL, sessionId: String)] = []
 
-                    for name in topFiles {
-                        if name.hasSuffix(".jsonl") {
-                            let sid = String(name.dropLast(6))
-                            jsonlEntries.append((dirURL.appendingPathComponent(name), sid))
+                    if currentProvider.usesAgentTranscripts {
+                        // Cursor layout: agent-transcripts/<sessionId>/<sessionId>.jsonl
+                        let transcriptsDir = dirURL.appendingPathComponent("agent-transcripts")
+                        if let sessionDirs = try? fm.contentsOfDirectory(atPath: transcriptsDir.path) {
+                            for sessionDir in sessionDirs {
+                                let sessionDirURL = transcriptsDir.appendingPathComponent(sessionDir)
+                                let jsonlFile = sessionDirURL.appendingPathComponent("\(sessionDir).jsonl")
+                                if fm.fileExists(atPath: jsonlFile.path) {
+                                    jsonlEntries.append((jsonlFile, sessionDir))
+                                }
+                            }
                         }
-                        // Check for subagent files inside session subdirectories
-                        let subagentsDir = dirURL.appendingPathComponent(name).appendingPathComponent("subagents")
-                        if let subFiles = try? fm.contentsOfDirectory(atPath: subagentsDir.path) {
-                            for subFile in subFiles where subFile.hasSuffix(".jsonl") {
-                                let subId = String(subFile.dropLast(6))
-                                jsonlEntries.append((subagentsDir.appendingPathComponent(subFile), subId))
+                    } else {
+                        // Claude Code layout: <sessionId>.jsonl at top level
+                        for name in topFiles {
+                            if name.hasSuffix(".jsonl") {
+                                let sid = String(name.dropLast(6))
+                                jsonlEntries.append((dirURL.appendingPathComponent(name), sid))
+                            }
+                            // Check for subagent files inside session subdirectories
+                            let subagentsDir = dirURL.appendingPathComponent(name).appendingPathComponent("subagents")
+                            if let subFiles = try? fm.contentsOfDirectory(atPath: subagentsDir.path) {
+                                for subFile in subFiles where subFile.hasSuffix(".jsonl") {
+                                    let subId = String(subFile.dropLast(6))
+                                    jsonlEntries.append((subagentsDir.appendingPathComponent(subFile), subId))
+                                }
                             }
                         }
                     }

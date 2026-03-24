@@ -26,6 +26,9 @@ struct ParsedRecordRaw: Decodable, Sendable {
     let cwd: String?
     let slug: String?
 
+    // Top-level role (used by Cursor format: {"role":"user","message":{...}})
+    let role: String?
+
     // user/assistant records
     let message: MessageRaw?
 
@@ -42,6 +45,17 @@ struct ParsedRecordRaw: Decodable, Sendable {
     let isCompactSummary: Bool?
     let isVisibleInTranscriptOnly: Bool?
 
+    /// Returns the effective record type, falling back to top-level `role` for Cursor format.
+    var effectiveType: RecordType? {
+        if let type { return type }
+        guard let role else { return nil }
+        switch role {
+        case "user": return .user
+        case "assistant": return .assistant
+        default: return nil
+        }
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         type = try container.decodeIfPresent(RecordType.self, forKey: .type)
@@ -51,6 +65,7 @@ struct ParsedRecordRaw: Decodable, Sendable {
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
         cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
         slug = try container.decodeIfPresent(String.self, forKey: .slug)
+        role = try container.decodeIfPresent(String.self, forKey: .role)
         message = try container.decodeIfPresent(MessageRaw.self, forKey: .message)
         subtype = try container.decodeIfPresent(String.self, forKey: .subtype)
         content = try container.decodeIfPresent(String.self, forKey: .content)
@@ -62,7 +77,7 @@ struct ParsedRecordRaw: Decodable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, uuid, parentUuid, timestamp, sessionId, cwd, slug
+        case type, uuid, parentUuid, timestamp, sessionId, cwd, slug, role
         case message, subtype, content, compactMetadata, logicalParentUuid
         case toolUseResult, isCompactSummary, isVisibleInTranscriptOnly
     }

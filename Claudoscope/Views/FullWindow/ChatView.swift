@@ -11,7 +11,7 @@ struct ChatView: View {
         guard !searchText.isEmpty else { return [] }
         let query = searchText.lowercased()
         return session.records.enumerated().compactMap { index, record in
-            guard record.type == .user || record.type == .assistant else { return nil }
+            guard record.effectiveType == .user || record.effectiveType == .assistant else { return nil }
             if recordContainsQuery(record, query: query) { return index }
             return nil
         }
@@ -186,7 +186,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private func recordView(for record: ParsedRecordRaw, index: Int) -> some View {
-        switch record.type {
+        switch record.effectiveType {
         case .user:
             UserMessageBubble(record: record)
 

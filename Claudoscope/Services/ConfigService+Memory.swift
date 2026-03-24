@@ -54,7 +54,8 @@ extension ConfigService {
             ))
         }
 
-        return files
+        // Only return files that actually exist on disk
+        return files.filter { $0.content != nil }
     }
 
     // MARK: - Extended Config

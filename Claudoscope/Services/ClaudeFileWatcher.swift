@@ -7,10 +7,11 @@ enum FileChange: Sendable {
     case configChanged(URL)
 }
 
-/// Watches ~/.claude/projects/ for file changes using FSEvents.
-/// Port of server/services/file-watcher.ts
+/// Watches project directories for file changes using FSEvents.
+/// Supports both Claude Code and Cursor directory layouts.
 final class ClaudeFileWatcher: @unchecked Sendable {
     private let claudeDir: URL
+    private let provider: AIProvider
     private var stream: FSEventStreamRef?
     private let subject = PassthroughSubject<FileChange, Never>()
     private var debounceTimers: [String: DispatchWorkItem] = [:]
@@ -22,8 +23,9 @@ final class ClaudeFileWatcher: @unchecked Sendable {
         subject.eraseToAnyPublisher()
     }
 
-    init(claudeDir: URL) {
+    init(claudeDir: URL, provider: AIProvider = .claudeCode) {
         self.claudeDir = claudeDir
+        self.provider = provider
     }
 
     func start() {

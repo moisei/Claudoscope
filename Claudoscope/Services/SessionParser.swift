@@ -67,7 +67,7 @@ actor SessionParser {
 
             // Skip compact summaries, progress, transcript-only
             if record.isCompactSummary == true { continue }
-            if record.type == .progress { continue }
+            if record.effectiveType == .progress { continue }
             if record.isVisibleInTranscriptOnly == true { continue }
 
             // Capture slug
@@ -83,11 +83,11 @@ actor SessionParser {
 
             messageCount += 1
 
-            if record.type == .user {
+            if record.effectiveType == .user {
                 userMessageCount += 1
             }
 
-            if record.type == .assistant {
+            if record.effectiveType == .assistant {
                 assistantMessageCount += 1
 
                 if record.message?.stopReason != nil, let usage = record.message?.usage {
@@ -103,12 +103,12 @@ actor SessionParser {
             }
 
             // Compaction boundaries
-            if record.type == .system && record.subtype == "compact_boundary" {
+            if record.effectiveType == .system && record.subtype == "compact_boundary" {
                 compactionCount += 1
             }
 
             // Build tool result map from top-level tool_result records
-            if record.type == .toolResult, let toolUseId = record.toolUseResult?.toolUseId {
+            if record.effectiveType == .toolResult, let toolUseId = record.toolUseResult?.toolUseId {
                 toolResultMap[toolUseId] = ToolResultEntry(
                     content: record.toolUseResult?.content ?? "",
                     isError: record.toolUseResult?.isError ?? false,
@@ -117,7 +117,7 @@ actor SessionParser {
             }
 
             // Extract tool_result blocks embedded in user message content arrays
-            if record.type == .user, case .blocks(let blocks) = record.message?.content {
+            if record.effectiveType == .user, case .blocks(let blocks) = record.message?.content {
                 for block in blocks {
                     if block.type == "tool_result", let toolUseId = block.toolUseId {
                         let resultText: String
@@ -143,6 +143,17 @@ actor SessionParser {
         if let projectsIndex = pathComponents.lastIndex(of: "projects"),
            projectsIndex + 1 < pathComponents.count {
             projectId = pathComponents[projectsIndex + 1]
+        }
+
+        // Fall back to file dates when JSONL lacks timestamps
+        if firstTimestamp.isEmpty || lastTimestamp.isEmpty {
+            let fileDates = Self.fileDateTimestamps(url: url)
+            if firstTimestamp.isEmpty, let created = fileDates.created {
+                firstTimestamp = created
+            }
+            if lastTimestamp.isEmpty, let modified = fileDates.modified {
+                lastTimestamp = modified
+            }
         }
 
         let metadata = SessionMetadata(
@@ -177,6 +188,9 @@ actor SessionParser {
             throw SessionParserError.invalidEncoding
         }
 
+        // Pre-compute file-date fallback for providers without per-record timestamps (e.g. Cursor)
+        let fileDates = Self.fileDateTimestamps(url: url)
+
         let projectId = deriveProjectId(from: url)
         var lineCount = 0
         var totalInputTokens = 0
@@ -190,6 +204,11 @@ actor SessionParser {
         var lastTimestamp = ""
         var firstLine = ""
         var perMessageCost = 0.0
+
+        // Character counters for token estimation when usage data is absent (Cursor)
+        var inputChars = 0
+        var outputChars = 0
+        var hasUsageData = false
 
         let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
 
@@ -207,7 +226,7 @@ actor SessionParser {
             do {
                 let raw = try decoder.decode(ParsedRecordRaw.self, from: lineData)
 
-                if raw.isCompactSummary == true || raw.type == .progress || raw.isVisibleInTranscriptOnly == true {
+                if raw.isCompactSummary == true || raw.effectiveType == .progress || raw.isVisibleInTranscriptOnly == true {
                     continue
                 }
 
@@ -220,7 +239,17 @@ actor SessionParser {
                     slug = s
                 }
 
-                if raw.type == .assistant, raw.message?.stopReason != nil, let usage = raw.message?.usage {
+                // Accumulate character counts for all messages (used as fallback)
+                if let text = raw.message?.content?.textContent {
+                    if raw.effectiveType == .user {
+                        inputChars += text.count
+                    } else if raw.effectiveType == .assistant {
+                        outputChars += text.count
+                    }
+                }
+
+                if raw.effectiveType == .assistant, raw.message?.stopReason != nil, let usage = raw.message?.usage {
+                    hasUsageData = true
                     // Deduplicate: skip records already counted from another file
                     if let uuid = raw.uuid {
                         if seenUUIDs.contains(uuid) { continue }
@@ -257,16 +286,48 @@ actor SessionParser {
                     }
                 }
 
-                if raw.type == .result, raw.message?.stopReason == "error" {
+                if raw.effectiveType == .result, raw.message?.stopReason == "error" {
                     hasError = true
                 }
 
-                if raw.type == .toolResult, raw.toolUseResult?.isError == true {
+                if raw.effectiveType == .toolResult, raw.toolUseResult?.isError == true {
                     hasError = true
                 }
             } catch {
                 continue
             }
+        }
+
+        // Cursor sessions: estimate tokens from character counts (~4 chars/token)
+        // and apply Cursor MAX mode pricing (API cost + 20% markup)
+        if !hasUsageData && (inputChars > 0 || outputChars > 0) {
+            let estimatedInput = max(inputChars / 4, 1)
+            let estimatedOutput = max(outputChars / 4, 1)
+            totalInputTokens = estimatedInput
+            totalOutputTokens = estimatedOutput
+
+            // Use sonnet pricing as default for Cursor (most common model)
+            let baseCost = estimateCostFromTokens(
+                model: "sonnet",
+                inputTokens: estimatedInput,
+                outputTokens: estimatedOutput,
+                cacheReadTokens: 0,
+                cacheCreation5mTokens: 0,
+                cacheCreation1hTokens: 0,
+                table: pricingTable
+            )
+            // Cursor MAX mode adds 20% markup over API pricing
+            perMessageCost = baseCost * 1.20
+
+            modelOutputTokens["cursor-estimated", default: 0] += estimatedOutput
+        }
+
+        // Fall back to file creation/modification dates when JSONL lacks timestamps
+        if firstTimestamp.isEmpty, let created = fileDates.created {
+            firstTimestamp = created
+        }
+        if lastTimestamp.isEmpty, let modified = fileDates.modified {
+            lastTimestamp = modified
         }
 
         let title = deriveTitle(slug: slug, firstLine: firstLine, sessionId: sessionId)
@@ -303,10 +364,16 @@ actor SessionParser {
 
         if let data = firstLine.data(using: .utf8),
            let raw = try? decoder.decode(ParsedRecordRaw.self, from: data),
-           raw.type == .user,
+           raw.effectiveType == .user,
            let content = raw.message?.content {
 
-            let text = content.textContent
+            var text = content.textContent
+            // Strip Cursor's <user_query> wrapper tags
+            if text.contains("<user_query>") {
+                text = text
+                    .replacingOccurrences(of: "<user_query>", with: "")
+                    .replacingOccurrences(of: "</user_query>", with: "")
+            }
             if !text.isEmpty {
                 let cleaned = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
                 if cleaned.count > 80 {
@@ -317,6 +384,20 @@ actor SessionParser {
         }
 
         return String(sessionId.prefix(8))
+    }
+
+    /// Returns ISO 8601 timestamps derived from the file's creation and modification dates.
+    static func fileDateTimestamps(url: URL) -> (created: String?, modified: String?) {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: url.path) else {
+            return (nil, nil)
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let created = (attrs[.creationDate] as? Date).map { formatter.string(from: $0) }
+        let modified = (attrs[.modificationDate] as? Date).map { formatter.string(from: $0) }
+        return (created, modified)
     }
 }
 

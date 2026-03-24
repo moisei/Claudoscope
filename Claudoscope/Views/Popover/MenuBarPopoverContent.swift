@@ -16,6 +16,7 @@ struct MenuBarPopoverContent: View {
                     .font(.system(size: 11, weight: .semibold))
                     .tracking(1.5)
                 Spacer()
+                ProviderSwitcher()
                 if let url = Bundle.main.url(forResource: "logo-c-t", withExtension: "png"),
                    let image = NSImage(contentsOf: url) {
                     Image(nsImage: image)

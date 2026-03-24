@@ -61,7 +61,7 @@ extension ConfigLinterService {
         results.append(LintResult(
             severity: .info,
             checkId: .XCT001,
-            filePath: projectRoot ?? "~/.claude",
+            filePath: projectRoot ?? globalDir.path,
             message: "Estimated always-loaded config tokens: ~\(estimatedTokens) (from \(totalChars) chars across CLAUDE.md and rules files).",
             displayPath: "Project config"
         ))
@@ -71,7 +71,7 @@ extension ConfigLinterService {
             results.append(LintResult(
                 severity: .warning,
                 checkId: .XCT002,
-                filePath: projectRoot ?? "~/.claude",
+                filePath: projectRoot ?? globalDir.path,
                 message: "Estimated always-loaded tokens (~\(estimatedTokens)) exceed 5,000. This consumes significant context on every request.",
                 fix: "Reduce config size by moving instructions to scoped rules or removing redundant content.",
                 displayPath: "Project config"

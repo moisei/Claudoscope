@@ -87,13 +87,23 @@ final class SessionStore {
         PricingTables.table(provider: pricingProvider, region: pricingRegion)
     }
 
-    private let claudeDir: URL
+    // AI Provider selection — use setActiveProvider() to change
+    private(set) var activeProvider: AIProvider
+
+    func setActiveProvider(_ provider: AIProvider) {
+        guard provider != activeProvider else { return }
+        activeProvider = provider
+        UserDefaults.standard.set(provider.rawValue, forKey: AIProvider.userDefaultsKey)
+        switchProvider(to: provider)
+    }
+
+    private(set) var claudeDir: URL
     private let parser = SessionParser()
     private let cache = SessionCache()
-    private let watcher: ClaudeFileWatcher
-    private let plansService: PlansService
-    private let timelineService: TimelineService
-    private let configService: ConfigService
+    private var watcher: ClaudeFileWatcher
+    private var plansService: PlansService
+    private var timelineService: TimelineService
+    private var configService: ConfigService
     private let linterService = ConfigLinterService()
     private var cancellables = Set<AnyCancellable>()
 
@@ -144,16 +154,58 @@ final class SessionStore {
     }
 
     init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        self.claudeDir = home.appendingPathComponent(".claude")
-        self.watcher = ClaudeFileWatcher(claudeDir: claudeDir)
-        self.plansService = PlansService(claudeDir: claudeDir)
-        self.timelineService = TimelineService(claudeDir: claudeDir)
-        self.configService = ConfigService(claudeDir: claudeDir)
+        let savedProvider = UserDefaults.standard.string(forKey: AIProvider.userDefaultsKey)
+            .flatMap(AIProvider.init(rawValue:)) ?? .claudeCode
+        let dir = savedProvider.baseDir
+        self.activeProvider = savedProvider
+        self.claudeDir = dir
+        self.watcher = ClaudeFileWatcher(claudeDir: dir, provider: savedProvider)
+        self.plansService = PlansService(claudeDir: dir)
+        self.timelineService = TimelineService(claudeDir: dir)
+        self.configService = ConfigService(claudeDir: dir)
 
         if UserDefaults.standard.object(forKey: "realtimeSecretScanEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "realtimeSecretScanEnabled")
         }
+
+        setupWatcher()
+        performInitialScan()
+    }
+
+    private func switchProvider(to provider: AIProvider) {
+        // Stop current watcher
+        watcher.stop()
+        cancellables.removeAll()
+
+        // Clear current state
+        projects = []
+        sessionsByProject = [:]
+        hasActiveSession = false
+        analyticsData = .empty
+        selectedSession = nil
+        plans = []
+        selectedPlanDetail = nil
+        timelineEntries = []
+        hookGroups = []
+        commands = []
+        skills = []
+        mcpServers = []
+        memoryFiles = []
+        extendedConfig = nil
+        lintResults = []
+        lintSummary = .empty
+        lintResultsValid = false
+        isLoading = true
+
+        // Reinitialize with new provider
+        claudeDir = provider.baseDir
+        watcher = ClaudeFileWatcher(claudeDir: claudeDir, provider: provider)
+        plansService = PlansService(claudeDir: claudeDir)
+        timelineService = TimelineService(claudeDir: claudeDir)
+        configService = ConfigService(claudeDir: claudeDir)
+
+        // Invalidate session cache
+        Task { await cache.clear() }
 
         setupWatcher()
         performInitialScan()
@@ -178,7 +230,8 @@ final class SessionStore {
             let scanner = ProjectScanner(
                 claudeDir: claudeDir,
                 parser: parser,
-                pricingTable: pricingTable
+                pricingTable: pricingTable,
+                provider: activeProvider
             )
             let (scannedProjects, scannedSessions) = await scanner.scan()
 
@@ -319,7 +372,8 @@ final class SessionStore {
             let scanner = ProjectScanner(
                 claudeDir: claudeDir,
                 parser: parser,
-                pricingTable: pricingTable
+                pricingTable: pricingTable,
+                provider: activeProvider
             )
             let (scannedProjects, scannedSessions) = await scanner.scan()
 
@@ -372,10 +426,20 @@ final class SessionStore {
             return
         }
 
-        let fileURL = claudeDir
-            .appendingPathComponent("projects")
-            .appendingPathComponent(projectId)
-            .appendingPathComponent("\(id).jsonl")
+        let fileURL: URL
+        if activeProvider.usesAgentTranscripts {
+            fileURL = claudeDir
+                .appendingPathComponent("projects")
+                .appendingPathComponent(projectId)
+                .appendingPathComponent("agent-transcripts")
+                .appendingPathComponent(id)
+                .appendingPathComponent("\(id).jsonl")
+        } else {
+            fileURL = claudeDir
+                .appendingPathComponent("projects")
+                .appendingPathComponent(projectId)
+                .appendingPathComponent("\(id).jsonl")
+        }
 
         do {
             let session = try await parser.parse(url: fileURL, sessionId: id)
